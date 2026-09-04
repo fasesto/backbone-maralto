@@ -16,7 +16,8 @@ Formato de observacoes.json (o agente só transcreve; quem decide é este script
    "GOVT":  [{"fonte": "stockanalysis", "preco": 22.35, "carimbo": "2026-09-04"}],
    "IBOV":  [{"fonte": "statusinvest", "preco": 185188, "carimbo": null}],
    "PTAX":  [{"fonte": "BCB-1", "preco": 5.0962, "carimbo": "2026-09-04"}],
-   "CDI":   [{"fonte": "BCB-4389", "preco": 13.90, "carimbo": "2026-09-03"}]
+   "CDI":   [{"fonte": "BCB-4389", "preco": 13.90, "carimbo": "2026-09-02"},
+             {"fonte": "BCB-4389", "preco": 13.90, "carimbo": "2026-09-03"}]   # todos os pontos da janela
  },
  "proventos": {"GOVT": 0.076}      # opcional: só ETFs EUA com data ex na data de referência
 }
@@ -28,8 +29,10 @@ vazia são equivalentes.
 Regras (na ordem):
  1. Carimbo. Todo ativo precisa de ao menos uma observação com carimbo igual à data de referência.
     Observação sem carimbo só corrobora. Duas exceções explícitas: IBOV (aceita sem carimbo,
-    só entra em texto comparativo, não na cota) e CDI (aceita o último ponto publicado, marcado
-    como provisório; o BCB publica com atraso e a taxa move a cota abaixo da terceira casa).
+    só entra em texto comparativo, não na cota) e CDI (aceita o último ponto publicado até a
+    referência, marcado como provisório se for de data anterior; o BCB publica com atraso e a taxa
+    move a cota abaixo da terceira casa). Pontos anteriores da mesma consulta corrigem CDI
+    provisório de pregões já gravados.
  2. Concordância. Entre as observações com carimbo válido, máximo/mínimo − 1 > 0,5% barra o ativo.
  3. Sanidade. Variação contra o pregão anterior acima de 15% barra o ativo.
 Preço escolhido: a observação válida da fonte de maior prioridade (ordem em PRIORIDADE).
@@ -56,7 +59,7 @@ def avaliar(obs_doc, est):
     ant = E.pregao_anterior(est, ref)
     p_ant = est["precos"].get(ant.strftime("%Y-%m-%d"))
     linhas, falhas, escolhidos, procedencia = [], [], {}, []
-    cdi_provisorio = False
+    cdi_provisorio = False; correcoes_cdi = {}
 
     for ativo in E.CAMPOS:
         lista = [dict(o) for o in obs.get(ativo, []) if o.get("preco") is not None]
@@ -69,13 +72,16 @@ def avaliar(obs_doc, est):
         desc = "; ".join(f"{o['fonte']} {o['preco']} @ {o.get('carimbo') or 'sem carimbo'}" for o in lista)
 
         if ativo == "CDI":
-            com = [o for o in lista if o.get("carimbo")]
+            com = [o for o in lista if o.get("carimbo") and o["carimbo"] <= ref.isoformat()]
             if not com:
-                falhas.append("CDI: fonte sem data"); linhas.append(f"CDI: {desc} -> BARRADO (sem data)"); continue
+                falhas.append("CDI: nenhum ponto com data até a referência"); linhas.append(f"CDI: {desc} -> BARRADO (sem data)"); continue
             o = max(com, key=lambda o: o["carimbo"])
-            if o["carimbo"] > ref.isoformat():
-                falhas.append("CDI: data posterior à referência"); linhas.append(f"CDI: {desc} -> BARRADO"); continue
             cdi_provisorio = o["carimbo"] < ref.isoformat()
+            # corrige CDI provisório de pregões anteriores que a mesma consulta já cobre
+            for d_prov in list(est.get("cdi_provisorio", [])):
+                pt = [x for x in com if x["carimbo"] == d_prov]
+                if pt:
+                    correcoes_cdi[d_prov] = float(pt[0]["preco"])
             escolhidos["CDI"] = float(o["preco"])
             tag = "provisório, última taxa publicada" if cdi_provisorio else "definitivo"
             linhas.append(f"CDI: {desc} -> {o['preco']} ({tag})")
@@ -122,7 +128,7 @@ def avaliar(obs_doc, est):
         rel.append("RESULTADO: PASSOU. Linha pronta para gravar.")
     return {"ref": ref, "passou": not falhas, "relatorio": "\n".join(rel), "precos": escolhidos,
             "procedencia": "; ".join(procedencia), "cdi_provisorio": cdi_provisorio,
-            "proventos": obs_doc.get("proventos") or None}
+            "correcoes_cdi": correcoes_cdi, "proventos": obs_doc.get("proventos") or None}
 
 def main():
     est = E.carregar()
@@ -152,6 +158,9 @@ def main():
     if not r["passou"]:
         return 1
     if gravar:
+        for d_prov, taxa in r["correcoes_cdi"].items():
+            E.corrigir_cdi(est, date.fromisoformat(d_prov), taxa)
+            print(f"CDI de {d_prov} corrigido para {taxa} (definitivo)")
         E.adicionar_pregao(est, ref, r["precos"], r["procedencia"], r["cdi_provisorio"], r["proventos"])
         E.gravar(est)
         print(f"\nGravado em {E.ARQ}: {ref.isoformat()}")

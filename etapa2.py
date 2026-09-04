@@ -2,13 +2,13 @@
 """Etapa 2: decide se a nota do dia sai, gera os .docx e marca o envio.
 
 Uso:
-    python etapa2.py decidir                 # imprime JSON: {"acao": ..., "ref": ..., "motivo": ...}
+    python etapa2.py decidir [AAAA-MM-DD]    # imprime JSON: {"acao": ..., "ref": ..., "motivo": ...}
     python etapa2.py cdi AAAA-MM-DD TAXA     # substitui CDI provisório pela taxa definitiva do BCB
-    python etapa2.py gerar                   # gera os dois .docx da referência e imprime os caminhos
-    python etapa2.py enviada                 # marca a referência como enviada (só depois do e-mail sair)
-    python etapa2.py serie                   # imprime as séries publicadas (markdown), para o espelho
+    python etapa2.py gerar [AAAA-MM-DD]      # gera os dois .docx da referência e imprime os caminhos
+    python etapa2.py enviada [AAAA-MM-DD]    # marca a referência como enviada (só depois do e-mail sair)
+    python etapa2.py serie                   # imprime as séries publicadas (markdown)
 
-Referência = último pregão B3 anterior a hoje (data de Brasília).
+Referência = a data passada; sem data, o último pregão B3 anterior a hoje (Brasília).
  - "enviar": referência está no estado e ainda não tem nota enviada.
  - "pular": referência já tem nota enviada (feriado ontem, ou execução repetida). Não avisar ninguém.
  - "falha": referência não está no estado. A coleta da véspera barrou. Avisar só o Bruno.
@@ -22,11 +22,11 @@ BRT = timezone(timedelta(hours=-3))
 def hoje_brt():
     return datetime.now(BRT).date()
 
-def referencia(est):
-    return E.pregao_anterior(est, hoje_brt())
+def referencia(est, arg=None):
+    return date.fromisoformat(arg) if arg else E.pregao_anterior(est, hoje_brt())
 
-def decidir(est):
-    ref = referencia(est)
+def decidir(est, arg=None):
+    ref = referencia(est, arg)
     if not E.tem_data(est, ref):
         return {"acao": "falha", "ref": ref.isoformat(),
                 "motivo": f"o fechamento de {ref.strftime('%d/%m/%Y')} não foi coletado; a coleta da véspera barrou"}
@@ -68,15 +68,16 @@ def serie_md(est):
 
 def main():
     cmd = sys.argv[1]
+    arg = sys.argv[2] if len(sys.argv) > 2 and cmd in ("decidir", "gerar", "enviada") else None
     est = E.carregar()
     if cmd == "decidir":
-        print(json.dumps(decidir(est), ensure_ascii=False)); return 0
+        print(json.dumps(decidir(est, arg), ensure_ascii=False)); return 0
     if cmd == "cdi":
         d, taxa = date.fromisoformat(sys.argv[2]), float(sys.argv[3])
         E.corrigir_cdi(est, d, taxa); E.gravar(est)
         print(f"CDI de {d} = {taxa} gravado como definitivo"); return 0
     if cmd == "gerar":
-        dec = decidir(est)
+        dec = decidir(est, arg)
         if dec["acao"] != "enviar":
             print(json.dumps(dec, ensure_ascii=False)); return 1
         import nota
@@ -84,7 +85,9 @@ def main():
             print(s)
         return 0
     if cmd == "enviada":
-        ref = referencia(est)
+        ref = referencia(est, arg)
+        if not E.tem_data(est, ref):
+            print(f"{ref} não está no estado; nada marcado"); return 1
         E.marcar_nota_enviada(est, ref); E.gravar(est)
         print(f"{ref} marcada como enviada"); return 0
     if cmd == "serie":
